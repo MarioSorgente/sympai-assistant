@@ -8,7 +8,6 @@ type Source = { title: string; url: string };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
 const NOTION_TOKEN = process.env.NOTION_TOKEN!;
-const PAGE_IDS = (process.env.PAGE_IDS || "").split(",").map(s => s.trim()).filter(Boolean);
 
 const notion = new Notion({ auth: NOTION_TOKEN });
 
@@ -31,6 +30,7 @@ async function getTitle(pageId: string) {
   return "Notion Page";
 }
 
+// Read plain text from a page's top-level blocks (paginated)
 async function fetchBlocksText(pageId: string): Promise<string> {
   let cursor: string | null = null;
   const lines: string[] = [];
@@ -55,6 +55,35 @@ async function fetchBlocksText(pageId: string): Promise<string> {
   return lines.join("\n");
 }
 
+// Discover ALL pages the integration can see (you already controlled access in Notion)
+async function discoverAccessiblePageIds(limit = 20): Promise<string[]> {
+  // empty query = list everything this integration can see
+  const results: string[] = [];
+  let cursor: string | undefined = undefined;
+
+  while (results.length < limit) {
+    const res = await notion.search({
+      query: "",
+      filter: { property: "object", value: "page" },
+      sort: { direction: "descending", timestamp: "last_edited_time" },
+      start_cursor: cursor,
+      page_size: 50
+    } as any);
+
+    (res.results || []).forEach((r: any) => {
+      if (r.object === "page" && results.length < limit) results.push(r.id);
+    });
+
+    if (!(res as any).has_more) break;
+    cursor = (res as any).next_cursor;
+  }
+
+  if (!results.length) {
+    throw new Error("No pages found. Ensure the integration has been invited to pages in Notion → Access.");
+  }
+  return results;
+}
+
 function makePrompt(context: string, question: string) {
   return `You are SympAI, a precise copilot for Technical Sales Engineers (TSEs).
 Answer clearly and practically using ONLY the provided context. Prefer step-by-step instructions for procedures.
@@ -72,22 +101,24 @@ async function ensureVectorStore() {
   const FRESH_MS = 10 * 60 * 1000; // rebuild every 10 min
   if (cache && Date.now() - lastBuilt < FRESH_MS) return cache;
 
-  if (!PAGE_IDS.length) throw new Error("PAGE_IDS not set");
+  const pageIds = await discoverAccessiblePageIds(20); // cap for PoC
 
   const documents: { pageContent: string; metadata: any }[] = [];
   const sources: Record<string, Source> = {};
 
-  for (const pid of PAGE_IDS) {
+  for (const pid of pageIds) {
     const text = await fetchBlocksText(pid);
     const title = await getTitle(pid);
-    const url = `https://www.notion.so/${pid.replace(/-/g, "")}`;
+    const url = `https://www.notion.so/${pid.replace(/-/g, "")}`; // generic permalink
     sources[pid] = { title, url };
     if (text?.trim()) {
       documents.push({ pageContent: text, metadata: { pid, title, url } });
     }
   }
 
-  if (!documents.length) throw new Error("No Notion content loaded. Check PAGE_IDS and sharing permissions.");
+  if (!documents.length) {
+    throw new Error("No readable content found in shared pages.");
+  }
 
   const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 900, chunkOverlap: 200 });
   const chunks = await splitter.splitDocuments(documents as any);
@@ -107,15 +138,12 @@ export async function POST(req: NextRequest) {
 
     const { store, sources } = await ensureVectorStore();
 
-    // retrieve
     const results = await store.similaritySearch(question, 4);
     const context = results.map(r => r.pageContent).join("\n---\n");
 
-    // LLM
     const llm = new ChatOpenAI({ apiKey: OPENAI_API_KEY, modelName: "gpt-4o-mini", temperature: 0 });
     const ans = await llm.invoke(makePrompt(context, question));
 
-    // citations
     const uniq = new Map<string, Source>();
     results.forEach(r => {
       const pid = (r.metadata as any)?.pid;
