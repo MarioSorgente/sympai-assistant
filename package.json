@@ -1,0 +1,20 @@
+{
+  "name": "sympai-min",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "start": "next start",
+    "dev": "next dev -p 3000"
+  },
+  "dependencies": {
+    "@langchain/openai": "0.3.6",
+    "@notionhq/client": "2.2.15",
+    "langchain": "0.2.17",
+    "next": "14.2.5",
+    "openai": "4.54.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "engines": { "node": "20.x" }
+}
